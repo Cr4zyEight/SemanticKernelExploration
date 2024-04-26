@@ -1,0 +1,13 @@
+{{> IntroductionWithExample }}
+{{> Helpers }}
+
+{{> UserGoal }}
+
+{{> AdditionalContext }}
+{{> RetryLogic }}
+
+{{> TipsAndInstructions }}
+
+{{#message role="system"}}
+You are not allowed to invent variable values. Only use variables that the user has given you. If variable values are missing, give the user an answer as to which variable values are missing.
+{{/message}}

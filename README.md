@@ -1,0 +1,1 @@
+Copy appsettings.Template.json rename it to appsettings.json and fill in your OpenAPI key
