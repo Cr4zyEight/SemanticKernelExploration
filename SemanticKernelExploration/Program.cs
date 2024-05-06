@@ -1,10 +1,10 @@
 ﻿using System.Reflection;
-using Azure.AI.OpenAI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.Agents.Chat;
+using Microsoft.SemanticKernel.Agents.OpenAI;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 using SemanticKernelExploration.Helper;
@@ -12,6 +12,7 @@ using SemanticKernelExploration.Plugins;
 
 #pragma warning disable SKEXP0110
 #pragma warning disable SKEXP0010
+#pragma warning disable SKEXP0001
 
 // Create the configuration
 var config = new ConfigurationBuilder()
@@ -23,234 +24,144 @@ var config = new ConfigurationBuilder()
     .AddEnvironmentVariables()
     .Build();
 
-// Define Agents
-const string InternalLeaderName = "InternalLeader";
-const string InternalLeaderInstructions =
+const string PlannerName = "Planner";
+const string PlannerInstructions =
     """
-        Your job is to clearly and directly communicate the current assistant response to the user.
-
-        If information has been requested, only repeat the request.
-
-        If information is provided, only repeat the information.
-
-        Do not come up with your own suggestions.
-        """;
-
-const string InternalPlanCreatorName = "InternalPlanner";
-const string InternalPlanCreatorInstructions =
-    """        
-        You are a personal planner that provides plans for achieving goals.
-
+        If you are requesteted to CREATE a plan call the 'CreatePlan' function in the 'HandlebarsPlannerPlugin' and respond the result.
+        If you are requested to EXECUTE a plan call the 'ExecutePlan' function in the 'HandlebarsPlannerPlugin' and respond the result.
         Always immediately incorporate review feedback and provide an updated response.
         """;
 
-const string InternalPlanReviewerName = "InternalPlanReviewer";
-const string InternalPlanReviewerInstructions =
+const string PlanReviewerName = "PlanReviewer";
+const string PlanReviewerInstructions =
     """
-        Review the most recent plan response.
-
-        It's important that you check if the plan is executable with the given information.
-        
-        If the plan is currently not executable requests additional information!
-
-        Either provide critical feedback to improve the response without introducing new ideas or state that the response is adequate.
+        You check handlebars plans to see if all the necessary variables are given. 
+        Request any missing information before giving the feedback.
         """;
 
-const string InternalPlanExecutorName = "InternalPlanExecutor";
-const string InternalPlanExecutorInstructions =
-    """
-        You take the previously created plan and execute it.
-
-        Then provide the result.
-        """;
-
-const string InnerSelectionInstructions =
-    $$$"""
-        Select which participant will take the next turn based on the conversation history.
-        
-        Only choose from these participants:
-        - {{{InternalPlanCreatorName}}}
-        - {{{InternalPlanReviewerName}}}
-        - {{{InternalLeaderName}}}
-        
-        Choose the next participant according to the action of the most recent participant:
-        - After user input, it is {{{InternalPlanCreatorName}}}'a turn.
-        - After {{{InternalPlanCreatorName}}} replies with a plan, it is {{{InternalPlanReviewerName}}}'s turn.
-        - After {{{InternalPlanReviewerName}}} requests additional information, it is {{{InternalLeaderName}}}'s turn.
-        - After {{{InternalPlanReviewerName}}} provides feedback or instruction, it is {{{InternalPlanCreatorName}}}'s turn.
-        - After {{{InternalPlanReviewerName}}} states the {{{InternalPlanCreatorName}}}'s response is adequate, it is {{{InternalPlanExecutorName}}}'s turn.
-        - After {{{InternalPlanExecutorName}}} replies, it is {{{InternalLeaderName}}}'s turn.
-        
-        Respond in JSON format.  The JSON schema can include only:
-        {
-            "name": "string (the name of the assistant selected for the next turn)",
-            "reason": "string (the reason for the participant was selected)"
-        }
-        
-        History:
-        {{${{{KernelFunctionSelectionStrategy.DefaultHistoryVariableName}}}}}
-        """;
-
-const string OuterTerminationInstructions =
-    $$$"""
-        Determine if user request has been fully answered.
-        
-        Respond in JSON format.  The JSON schema can include only:
-        {
-            "isAnswered": "bool (true if the user request has been fully answered)",
-            "reason": "string (the reason for your determination)"
-        }
-        
-        History:
-        {{${{{KernelFunctionTerminationStrategy.DefaultHistoryVariableName}}}}}
-        """;
-
-
-OpenAIPromptExecutionSettings jsonSettings = new() { ResponseFormat = ChatCompletionsResponseFormat.JsonObject };
-
-// Create the Agents
-ChatCompletionAgent internalLeaderAgent = CreateAgent(InternalLeaderName, InternalLeaderInstructions);
-
-ChatCompletionAgent internalPlanCreatorAgent = CreateAgent(InternalPlanCreatorName, InternalPlanCreatorInstructions);
-internalPlanCreatorAgent.Kernel.Plugins.AddFromType<HandlebarsPlannerPlugin>();
-internalPlanCreatorAgent.Kernel.Plugins.AddFromType<EmailPlugin>();
-
-ChatCompletionAgent internalPlanReviewerAgent = CreateAgent(InternalPlanReviewerName, InternalPlanReviewerInstructions);
-internalPlanReviewerAgent.Kernel.Plugins.AddFromType<HandlebarsPlannerPlugin>();
-internalPlanReviewerAgent.Kernel.Plugins.AddFromType<EmailPlugin>();
-
-ChatCompletionAgent internalPlanExecutorAgent = CreateAgent(InternalPlanExecutorName, InternalPlanExecutorInstructions);
-internalPlanExecutorAgent.Kernel.Plugins.AddFromType<HandlebarsPlannerPlugin>();
-internalPlanExecutorAgent.Kernel.Plugins.AddFromType<EmailPlugin>();
-
-KernelFunction innerSelectionFunction = KernelFunctionFactory.CreateFromPrompt(InnerSelectionInstructions, jsonSettings);
-KernelFunction outerTerminationFunction = KernelFunctionFactory.CreateFromPrompt(OuterTerminationInstructions, jsonSettings);
-
-AggregatorAgent mainAgent =
-    new(CreateChat)
-    {
-        Name = "Main",
-        Mode = AggregatorMode.Nested,
-    };
-
-AgentGroupChat chat =
+// Define the agents
+ChatCompletionAgent plannerAgent =
     new()
     {
-        ExecutionSettings =
-            new()
-            {
-                TerminationStrategy =
-                    new KernelFunctionTerminationStrategy(outerTerminationFunction, CreateKernelWithChatCompletion())
-                    {
-                        ResultParser =
-                            (result) =>
-                            {
-                                OuterTerminationResult? jsonResult = JsonResultTranslator.Translate<OuterTerminationResult>(result.GetValue<string>());
-
-                                return jsonResult?.isAnswered ?? false;
-                            },
-                        MaximumIterations = 5,
-                    },
-            }
+        Instructions = PlannerInstructions,
+        Name = PlannerName,
+        Kernel = CreateKernelWithChatCompletion(config),
+        ExecutionSettings = new OpenAIPromptExecutionSettings() { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions },
     };
 
-AgentGroupChat CreateChat() =>
-    new(internalLeaderAgent, internalPlanCreatorAgent, internalPlanReviewerAgent, internalPlanExecutorAgent)
+ChatCompletionAgent planReviewerAgent =
+    new()
+    {
+        Instructions = PlanReviewerInstructions,
+        Name = PlanReviewerName,
+        Kernel = CreateKernelWithChatCompletion(config)
+    };
+
+KernelFunction terminationFunction =
+    KernelFunctionFactory.CreateFromPrompt(
+        $$$"""
+                Determine if user request has been fully answered.
+
+                History:
+                {{${{{KernelFunctionSelectionStrategy.DefaultHistoryVariableName}}}}}
+                """);
+
+KernelFunction selectionFunction =
+    KernelFunctionFactory.CreateFromPrompt(
+        $$$"""
+                Your job is to determine which participant takes the next turn in a conversation according to the action of the most recent participant.
+                State only the name of the participant to take the next turn.
+
+                Choose only from these participants:
+                - {{{PlannerName}}}
+                - {{{PlanReviewerName}}}
+
+                Always follow these rules when selecting the next participant:
+                - After user input, it is {{{PlannerName}}}'s turn.
+                - After {{{PlannerName}}} replies, it is {{{PlanReviewerName}}}'s turn.
+                - Interpret {{{PlanReviewerName}}}'s response and decide the next step
+                
+                History:
+                {{${{{KernelFunctionSelectionStrategy.DefaultHistoryVariableName}}}}}
+                """);
+
+// Create a chat for agent interaction.
+AgentGroupChat chat =
+    new(plannerAgent, planReviewerAgent)
     {
         ExecutionSettings =
             new()
             {
-                SelectionStrategy =
-                    new KernelFunctionSelectionStrategy(innerSelectionFunction, CreateKernelWithChatCompletion())
-                    {
-                        ResultParser =
-                            (result) =>
-                            {
-                                AgentSelectionResult? jsonResult = JsonResultTranslator.Translate<AgentSelectionResult>(result.GetValue<string>());
-
-                                string? agentName = string.IsNullOrWhiteSpace(jsonResult?.name) ? null : jsonResult?.name;
-                                agentName ??= InternalPlanCreatorName;
-
-                                Console.WriteLine($"\t>>>> INNER TURN: {agentName}");
-
-                                return agentName;
-                            }
-                    },
+                // Here KernelFunctionTerminationStrategy will terminate
+                // when the plan reviewer has given their approval.
                 TerminationStrategy =
-                    new AgentTerminationStrategy()
+                    new KernelFunctionTerminationStrategy(terminationFunction, CreateKernelWithChatCompletion(config))
                     {
-                        Agents = new List<Agent>(){ internalLeaderAgent },
-                        MaximumIterations = 7,
-                        AutomaticReset = true,
+                        // Only the plan reviewer may approve.
+                        Agents = new List<Agent>() { planReviewerAgent },
+                        // Customer result parser to determine if the response is "exit"
+                        ResultParser = (result) => result.GetValue<string>()?.Contains("exit", StringComparison.OrdinalIgnoreCase) ?? false,
+                        // Limit total number of turns
+                        MaximumIterations = 10,
+                    },
+                // Here a KernelFunctionSelectionStrategy selects agents based on a prompt function.
+                SelectionStrategy =
+                    new KernelFunctionSelectionStrategy(selectionFunction, CreateKernelWithChatCompletion(config))
+                    {
+                        // Returns the entire result value as a string.
+                        ResultParser = (result) => result.GetValue<string>() ?? PlannerName,
                     },
             }
     };
 
-// Invoke chat and display messages.
-Console.WriteLine("\n######################################");
-Console.WriteLine("# DYNAMIC CHAT");
-Console.WriteLine("######################################");
+// Start the conversation
+string? input = null;
 
-await InvokeChatAsync("Can you provide three original birthday gift ideas.  I don't want a gift that someone else will also pick.");
-
-async Task InvokeChatAsync(string input)
+do
 {
+    Console.Write("User > ");
+    input = Console.ReadLine();
+
+    if (string.IsNullOrWhiteSpace(input))
+    {
+        // Leaves if the user hit enter without typing any word
+        break;
+    }
+
     chat.AddChatMessage(new ChatMessageContent(AuthorRole.User, input));
+    // Invoke chat and display messages.
 
-    Console.WriteLine($"# {AuthorRole.User}: '{input}'");
-
-    await foreach (var content in chat.InvokeAsync(mainAgent))
+    await foreach (var content in chat.InvokeAsync())
     {
         Console.WriteLine($"# {content.Role} - {content.AuthorName ?? "*"}: '{content.Content}'");
     }
 
-    Console.WriteLine($"\n# IS COMPLETE: {chat.IsComplete}");
-}
+    Console.WriteLine($"# IS COMPLETE: {chat.IsComplete}");
+} while (!chat.IsComplete);
 
-// ########################################################################################################################
-// ### Helper functions 
-// ########################################################################################################################
-ChatCompletionAgent CreateAgent(string agentName, string agentInstructions) =>
-    new()
-    {
-        Instructions = agentInstructions,
-        Name = agentName,
-        Kernel = CreateKernelWithChatCompletion(),
-    };
 
-Kernel CreateKernelWithChatCompletion()
+Kernel CreateKernelWithChatCompletion(IConfigurationRoot configurationRoot)
 {
     // Create the kernel
     var kernelBuilder = Kernel.CreateBuilder();
 
     // Add the configuration as singleton service for Dependency Injection (DI)
-    kernelBuilder.Services.AddSingleton<IConfiguration>(config);
+    kernelBuilder.Services.AddSingleton<IConfiguration>(configurationRoot);
+
+    // Add Plugins to Semantic Kernel
+    kernelBuilder.Plugins.AddFromType<EmailPlugin>();
+    kernelBuilder.Plugins.AddFromType<HandlebarsPlannerPlugin>();
 
     kernelBuilder.Services.AddOpenAIChatCompletion(
-        config["OPEN_AI_MODEL_ID"]!,
-        config["OPEN_AI_API_KEY"]!
+        configurationRoot["OPEN_AI_MODEL_ID"]!,
+        configurationRoot["OPEN_AI_API_KEY"]!
     );
 
     // Build the kernel
     var kernel = kernelBuilder.Build();
-
     return kernel;
 }
 
-record OuterTerminationResult(bool isAnswered, string reason);
-
-record AgentSelectionResult(string name, string reason);
-
-class AgentTerminationStrategy : TerminationStrategy
-{
-    /// <inheritdoc/>
-    protected override Task<bool> ShouldAgentTerminateAsync(Agent agent, IReadOnlyList<ChatMessageContent> history,
-        CancellationToken cancellationToken = default)
-    {
-        return Task.FromResult(true);
-    }
-}
-
-
+#pragma warning restore SKEXP0001
 #pragma warning restore SKEXP0110
 #pragma warning restore SKEXP0010

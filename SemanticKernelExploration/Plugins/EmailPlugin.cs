@@ -15,11 +15,11 @@ public class EmailPlugin
     private const string CacheFileName = "emailCache.json";
     private string _cacheFilePath => Path.Combine(CacheFolderPath, CacheFileName);
 
-    private readonly IConfiguration _configuration;
+    //private readonly IConfiguration _configuration;
 
-    public EmailPlugin(IConfiguration configuration)
+    public EmailPlugin()
     {
-        _configuration = configuration;
+        //_configuration = configuration;
     }
 
     [KernelFunction]

@@ -25,6 +25,7 @@
     <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="6.0.1" />
     <PackageReference Include="Microsoft.SemanticKernel" Version="1.10.0" />
     <PackageReference Include="Microsoft.SemanticKernel.Agents.Core" Version="1.10.0-alpha" />
+    <PackageReference Include="Microsoft.SemanticKernel.Agents.OpenAI" Version="1.10.0-alpha" />
     <PackageReference Include="Microsoft.SemanticKernel.Planners.Handlebars" Version="1.10.0-preview" />
     <PackageReference Include="System.Configuration.ConfigurationManager" Version="8.0.0" />
   </ItemGroup>
