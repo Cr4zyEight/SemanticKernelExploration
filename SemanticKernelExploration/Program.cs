@@ -27,118 +27,48 @@ var config = new ConfigurationBuilder()
 const string PlannerName = "Planner";
 const string PlannerInstructions =
     """
-        If you are requesteted to CREATE a plan call the 'CreatePlan' function in the 'HandlebarsPlannerPlugin' and respond the result.
-        If you are requested to EXECUTE a plan call the 'ExecutePlan' function in the 'HandlebarsPlannerPlugin' and respond the result.
-        Always immediately incorporate review feedback and provide an updated response.
+        You are responsible for creating, checking and executing a plan that will fulfill the users request.
+        Only create ONE plan per main request.
+        DO NOT create a new plan if the user gives you additional info that you asked for.
+        DO NOT call any functions on your own.
+        Plan execution ONLY!
+        
+        You MUST follow the following steps in the given order!
+
+        ## Steps
+        1. Create the plan invoking 'CreatePlan' to fulfill the users request. Then print out the plan.
+        2. Analyze the plan and check if all required parameters are given to execute the plan. Ask the user for each missing parameter, if necessary.
+        3. When all parameters have been provided, invoke 'ExecutePlan' and respond with the result. If the plan is not created successfully, start again at step 1.
         """;
 
-const string PlanReviewerName = "PlanReviewer";
-const string PlanReviewerInstructions =
-    """
-        You check handlebars plans to see if all the necessary variables are given. 
-        Request any missing information before giving the feedback.
-        """;
-
-// Define the agents
 ChatCompletionAgent plannerAgent =
     new()
     {
         Instructions = PlannerInstructions,
         Name = PlannerName,
         Kernel = CreateKernelWithChatCompletion(config),
-        ExecutionSettings = new OpenAIPromptExecutionSettings() { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions },
+        ExecutionSettings = new OpenAIPromptExecutionSettings() { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions, MaxTokens = 1024 },
     };
-
-ChatCompletionAgent planReviewerAgent =
-    new()
-    {
-        Instructions = PlanReviewerInstructions,
-        Name = PlanReviewerName,
-        Kernel = CreateKernelWithChatCompletion(config)
-    };
-
-KernelFunction terminationFunction =
-    KernelFunctionFactory.CreateFromPrompt(
-        $$$"""
-                Determine if user request has been fully answered.
-
-                History:
-                {{${{{KernelFunctionSelectionStrategy.DefaultHistoryVariableName}}}}}
-                """);
-
-KernelFunction selectionFunction =
-    KernelFunctionFactory.CreateFromPrompt(
-        $$$"""
-                Your job is to determine which participant takes the next turn in a conversation according to the action of the most recent participant.
-                State only the name of the participant to take the next turn.
-
-                Choose only from these participants:
-                - {{{PlannerName}}}
-                - {{{PlanReviewerName}}}
-
-                Always follow these rules when selecting the next participant:
-                - After user input, it is {{{PlannerName}}}'s turn.
-                - After {{{PlannerName}}} replies, it is {{{PlanReviewerName}}}'s turn.
-                - Interpret {{{PlanReviewerName}}}'s response and decide the next step
-                
-                History:
-                {{${{{KernelFunctionSelectionStrategy.DefaultHistoryVariableName}}}}}
-                """);
-
-// Create a chat for agent interaction.
-AgentGroupChat chat =
-    new(plannerAgent, planReviewerAgent)
-    {
-        ExecutionSettings =
-            new()
-            {
-                // Here KernelFunctionTerminationStrategy will terminate
-                // when the plan reviewer has given their approval.
-                TerminationStrategy =
-                    new KernelFunctionTerminationStrategy(terminationFunction, CreateKernelWithChatCompletion(config))
-                    {
-                        // Only the plan reviewer may approve.
-                        Agents = new List<Agent>() { planReviewerAgent },
-                        // Customer result parser to determine if the response is "exit"
-                        ResultParser = (result) => result.GetValue<string>()?.Contains("exit", StringComparison.OrdinalIgnoreCase) ?? false,
-                        // Limit total number of turns
-                        MaximumIterations = 10,
-                    },
-                // Here a KernelFunctionSelectionStrategy selects agents based on a prompt function.
-                SelectionStrategy =
-                    new KernelFunctionSelectionStrategy(selectionFunction, CreateKernelWithChatCompletion(config))
-                    {
-                        // Returns the entire result value as a string.
-                        ResultParser = (result) => result.GetValue<string>() ?? PlannerName,
-                    },
-            }
-    };
-
 // Start the conversation
 string? input = null;
-
-do
+var chathistory = new ChatHistory();
+while (true)
 {
     Console.Write("User > ");
     input = Console.ReadLine();
 
     if (string.IsNullOrWhiteSpace(input))
     {
-        // Leaves if the user hit enter without typing any word
         break;
     }
-
-    chat.AddChatMessage(new ChatMessageContent(AuthorRole.User, input));
+    chathistory.AddUserMessage(input);
     // Invoke chat and display messages.
-
-    await foreach (var content in chat.InvokeAsync())
+    await foreach (var content in plannerAgent.InvokeAsync(chathistory))
     {
         Console.WriteLine($"# {content.Role} - {content.AuthorName ?? "*"}: '{content.Content}'");
+        chathistory.Add(content);
     }
-
-    Console.WriteLine($"# IS COMPLETE: {chat.IsComplete}");
-} while (!chat.IsComplete);
-
+}
 
 Kernel CreateKernelWithChatCompletion(IConfigurationRoot configurationRoot)
 {
