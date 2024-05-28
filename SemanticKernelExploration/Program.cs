@@ -1,18 +1,26 @@
 ﻿using System.Reflection;
+using DocumentFormat.OpenXml.Spreadsheet;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.KernelMemory;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.Agents.Chat;
 using Microsoft.SemanticKernel.Agents.OpenAI;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
-using SemanticKernelExploration.Helper;
+using Microsoft.SemanticKernel.Connectors.Postgres;
+using Microsoft.SemanticKernel.Memory;
+using Microsoft.SemanticKernel.Plugins.Memory;
+using Npgsql;
 using SemanticKernelExploration.Plugins;
 
 #pragma warning disable SKEXP0110
 #pragma warning disable SKEXP0010
 #pragma warning disable SKEXP0001
+#pragma warning disable SKEXP0020
+#pragma warning disable SKEXP0050
 
 // Create the configuration
 var config = new ConfigurationBuilder()
@@ -24,34 +32,41 @@ var config = new ConfigurationBuilder()
     .AddEnvironmentVariables()
     .Build();
 
-const string PlannerName = "Planner";
-const string PlannerInstructions =
-    """
-        You are responsible for creating, checking and executing a plan that will fulfill the users request.
-        Only create ONE plan per main request.
-        DO NOT create a new plan if the user gives you additional info that you asked for.
-        DO NOT call any functions on your own.
-        Plan execution ONLY!
-        
-        You MUST follow the following steps in the given order!
+var memory = new KernelMemoryBuilder()
+    .WithOpenAIDefaults(config["OPEN_AI_API_KEY"])
+    .Build<MemoryServerless>();
 
-        ## Steps
-        1. Create the plan invoking 'CreatePlan' to fulfill the users request. Then print out the plan.
-        2. Analyze the plan and check if all required parameters are given to execute the plan. Ask the user for each missing parameter, if necessary.
-        3. When all parameters have been provided, invoke 'ExecutePlan' and respond with the result. If the plan is not created successfully, start again at step 1.
-        """;
+await SaveEmailsToMemory(memory);
+var answer = await memory.AskAsync("Tell me something about Chester Bennington?");
+//var answer = await memory.AskAsync("Give me the subjects of my 3 newest mails?");
 
-ChatCompletionAgent plannerAgent =
-    new()
-    {
-        Instructions = PlannerInstructions,
-        Name = PlannerName,
-        Kernel = CreateKernelWithChatCompletion(config),
-        ExecutionSettings = new OpenAIPromptExecutionSettings() { ToolCallBehavior = ToolCallBehavior.AutoInvokeKernelFunctions, MaxTokens = 1024 },
-    };
+Console.WriteLine(answer.Result + "/n");
+
+var kernel = CreateKernelWithChatCompletion(config);
+
+NpgsqlDataSourceBuilder dataSourceBuilder = new NpgsqlDataSourceBuilder(config["KernelMemory:Services:Postgres:ConnectionString"]);
+dataSourceBuilder.UseVector();
+NpgsqlDataSource dataSource = dataSourceBuilder.Build();
+
+var memoryWithPostgres = new MemoryBuilder()
+    .WithPostgresMemoryStore(dataSource, vectorSize: 1536, schema: "public")
+    .WithOpenAITextEmbeddingGeneration("text-embedding-ada-002", config["OPEN_AI_API_KEY"]!)
+    .Build();
+
+kernel.ImportPluginFromObject(new TextMemoryPlugin(memoryWithPostgres), "memory");
+
+var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+OpenAIPromptExecutionSettings settings = new() { ToolCallBehavior = ToolCallBehavior.EnableKernelFunctions };
+
+//await StoreMemoryAsync(memoryWithPostgres);
+
+//await SearchMemoryAsync(memoryWithPostgres, "Give me the newest mails");
+
+
 // Start the conversation
 string? input = null;
-var chathistory = new ChatHistory();
+var chatHistory = new ChatHistory();
 while (true)
 {
     Console.Write("User > ");
@@ -61,13 +76,43 @@ while (true)
     {
         break;
     }
-    chathistory.AddUserMessage(input);
-    // Invoke chat and display messages.
-    await foreach (var content in plannerAgent.InvokeAsync(chathistory))
+
+    chatHistory.AddUserMessage(input);
+
+    ChatMessageContent result = await chat.GetChatMessageContentAsync(chatHistory, settings, kernel);
+
+    if (result.Content is not null)
     {
-        Console.WriteLine($"# {content.Role} - {content.AuthorName ?? "*"}: '{content.Content}'");
-        chathistory.Add(content);
+        Console.Write(result.Content);
     }
+
+    IEnumerable<FunctionCallContent> functionCalls = FunctionCallContent.GetFunctionCalls(result);
+    if (!functionCalls.Any())
+    {
+        break;
+    }
+
+    chatHistory.Add(result); // Adding LLM response containing function calls(requests) to chat history as it's required by LLMs.
+
+    foreach (var functionCall in functionCalls)
+    {
+        try
+        {
+            FunctionResultContent resultContent = await functionCall.InvokeAsync(kernel); // Executing each function.
+
+            chatHistory.Add(resultContent.ToChatMessage());
+        }
+        catch (Exception ex)
+        {
+            chatHistory.Add(new FunctionResultContent(functionCall, ex).ToChatMessage()); // Adding function result to chat history.
+            // Adding exception to chat history.
+            // or
+            //string message = "Error details that LLM can reason about.";
+            //chatHistory.Add(new FunctionResultContent(functionCall, message).ToChatMessageContent()); // Adding function result to chat history.
+        }
+    }
+
+    Console.WriteLine();
 }
 
 Kernel CreateKernelWithChatCompletion(IConfigurationRoot configurationRoot)
@@ -79,8 +124,8 @@ Kernel CreateKernelWithChatCompletion(IConfigurationRoot configurationRoot)
     kernelBuilder.Services.AddSingleton<IConfiguration>(configurationRoot);
 
     // Add Plugins to Semantic Kernel
-    kernelBuilder.Plugins.AddFromType<EmailPlugin>();
-    kernelBuilder.Plugins.AddFromType<HandlebarsPlannerPlugin>();
+    //kernelBuilder.Plugins.AddFromType<EmailPlugin>();
+    //kernelBuilder.Plugins.AddFromType<HandlebarsPlannerPlugin>();
 
     kernelBuilder.Services.AddOpenAIChatCompletion(
         configurationRoot["OPEN_AI_MODEL_ID"]!,
@@ -92,6 +137,76 @@ Kernel CreateKernelWithChatCompletion(IConfigurationRoot configurationRoot)
     return kernel;
 }
 
+async Task SaveEmailsToMemory(IKernelMemory memory)
+{
+    //var emails = EmailPlugin.GetEmails("mail.wkg-software.de", 993, "frebel@wkg-software.de", "Sp4rt4n117!H4l0");
+    //foreach (var email in emails)
+    //{
+    //    await memory.ImportTextAsync(
+    //        text: email.Body,
+    //        tags: new()
+    //        {
+    //            { nameof(email.Id), email.Id },
+    //            { nameof(email.Date), email.Date },
+    //            { nameof(email.From), email.From },
+    //            { nameof(email.To), email.To },
+    //            { nameof(email.Subject), email.Subject }
+    //        });
+    //}
+    await memory.ImportWebPageAsync("https://en.wikipedia.org/wiki/Linkin_Park", "Linkin Park");
+}
+
+async Task StoreMemoryAsync(ISemanticTextMemory memory)
+{
+    var emails = EmailPlugin.GetEmails("mail.wkg-software.de", 993, "frebel@wkg-software.de", "Sp4rt4n117!H4l0");
+    var i = 0;
+    foreach (var email in emails)
+    {
+        await memory.SaveInformationAsync(
+            id: email.Id,
+            collection: "emails_test_collection_info",
+            text: $@"Date: {email.Date}
+Sender: {email.From}
+Receiver: {email.To}
+Subject: {email.Subject}
+Body: {email.Body}");
+
+//        await memory.SaveReferenceAsync(
+//            collection: "emails_test_collection",
+//            externalSourceName: "emails_test_externalsourcename",
+//            externalId: email.Id,
+//            description: string.Empty,
+//            text: @$"Date: {email.Date}
+//Sender: {email.From}
+//Receiver: {email.To}
+//Subject: {email.Subject}
+//Body: {email.Body}");
+    }
+
+    Console.WriteLine($" #{++i} saved.");
+}
+
+async Task SearchMemoryAsync(ISemanticTextMemory memory, string query)
+{
+    Console.WriteLine("\nQuery: " + query + "\n");
+
+    var memoryResults = memory.SearchAsync("emails_test_collection_info", query, limit: 10, minRelevanceScore: 0.75);
+
+    int i = 0;
+    await foreach (MemoryQueryResult memoryResult in memoryResults)
+    {
+        Console.WriteLine($"Result {++i}:");
+        Console.WriteLine("  URL:     : " + memoryResult.Metadata.Id);
+        Console.WriteLine("  Relevance: " + memoryResult.Relevance);
+        Console.WriteLine("  Text    : " + memoryResult.Metadata.Text);
+        Console.WriteLine();
+    }
+
+    Console.WriteLine("----------------------");
+}
+
+#pragma warning restore SKEXP0020
 #pragma warning restore SKEXP0001
 #pragma warning restore SKEXP0110
 #pragma warning restore SKEXP0010
+#pragma warning restore SKEXP0050

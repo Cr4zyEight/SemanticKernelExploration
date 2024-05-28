@@ -22,11 +22,13 @@
     <PackageReference Include="MailKit" Version="4.5.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.CommandLine" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="6.0.1" />
-    <PackageReference Include="Microsoft.SemanticKernel" Version="1.10.0" />
+    <PackageReference Include="Microsoft.KernelMemory.Core" Version="0.61.240524.1" />
+    <PackageReference Include="Microsoft.SemanticKernel" Version="1.13.0" />
     <PackageReference Include="Microsoft.SemanticKernel.Agents.Core" Version="1.10.0-alpha" />
     <PackageReference Include="Microsoft.SemanticKernel.Agents.OpenAI" Version="1.10.0-alpha" />
+    <PackageReference Include="Microsoft.SemanticKernel.Connectors.Postgres" Version="1.13.0-alpha" />
     <PackageReference Include="Microsoft.SemanticKernel.Planners.Handlebars" Version="1.10.0-preview" />
+    <PackageReference Include="Microsoft.SemanticKernel.Plugins.Memory" Version="1.13.0-alpha" />
     <PackageReference Include="System.Configuration.ConfigurationManager" Version="8.0.0" />
   </ItemGroup>
 
